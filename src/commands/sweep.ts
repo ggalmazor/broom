@@ -108,6 +108,19 @@ function clearProgress(): void {
   }
 }
 
+/**
+ * Erase the Cliffy "success" summary line that is printed after a prompt
+ * resolves. Cliffy writes `prefix + message + " › " + format(value) + "\n"`,
+ * then the cursor sits at the start of the next line. We move up one row and
+ * clear from the cursor to end-of-screen so callers can print their own
+ * follow-up without the noisy comma-joined selection list.
+ */
+function eraseLastLine(): void {
+  if (isTTY()) {
+    Deno.stdout.writeSync(new TextEncoder().encode('\x1b[1A\x1b[0J'));
+  }
+}
+
 async function fetchOrigin(): Promise<void> {
   const cmd = new Deno.Command('git', {
     args: ['fetch', 'origin', '--prune'],
@@ -260,6 +273,7 @@ export async function sweepCommand(
     options: checkboxOptions,
     search: true,
   });
+  eraseLastLine();
 
   if (selected.length === 0) {
     console.log('\nNo branches selected. Nothing deleted.');
@@ -286,6 +300,7 @@ export async function sweepCommand(
     message: `Delete ${selected.length} branch${selected.length === 1 ? '' : 'es'}?`,
     default: false,
   });
+  eraseLastLine();
 
   if (!confirmed) {
     console.log('\nCancelled. Nothing deleted.');
