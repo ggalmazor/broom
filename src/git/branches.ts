@@ -66,6 +66,72 @@ export async function getLocalBranches(): Promise<string[]> {
     .filter((l) => l.length > 0 && l !== 'main');
 }
 
+export interface FastForwardResult {
+  branch: string;
+  updated: boolean;
+  error?: string;
+}
+
+/**
+ * For every local branch that has a live upstream tracking ref and is strictly
+ * behind it (no local-only commits), fast-forward the local ref without
+ * requiring a checkout. Uses `git fetch origin <branch>:<branch>`.
+ *
+ * Branches that are ahead, diverged, or have no upstream are skipped silently.
+ * The currently checked-out branch is also skipped (git refuses to fast-forward it
+ * this way; the user can `git pull` that themselves).
+ *
+ * Returns one result per branch that was attempted.
+ */
+export async function fastForwardBranches(): Promise<FastForwardResult[]> {
+  // Get all local branches with their upstream tracking status in one shot
+  const { stdout } = await git([
+    'branch',
+    '--list',
+    '--format=%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(HEAD)',
+  ]);
+
+  const results: FastForwardResult[] = [];
+
+  const lines = stdout.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+
+  for (const line of lines) {
+    const parts = line.split('\t');
+    const branch = parts[0];
+    const upstream = parts[1] ?? '';
+    const track = parts[2] ?? '';
+    const head = parts[3] ?? '';
+
+    // Skip currently checked-out branch (git fetch <ref>:<ref> fails on HEAD)
+    if (head === '*') continue;
+
+    // Skip branches with no upstream or whose remote was pruned
+    if (!upstream || track === '[gone]') continue;
+
+    // Only fast-forward if strictly behind (no local-only commits)
+    // track looks like "[behind 3]" or "[ahead 1, behind 2]" or "[ahead 2]"
+    const isBehind = track.includes('behind');
+    const isAhead = track.includes('ahead');
+    if (!isBehind || isAhead) continue;
+
+    // Fast-forward without checkout: fetch the remote ref directly into local
+    const upstreamBranch = upstream.replace(/^origin\//, '');
+    const { success, stdout: errOut } = await git([
+      'fetch',
+      'origin',
+      `${upstreamBranch}:${branch}`,
+    ]);
+
+    if (success) {
+      results.push({ branch, updated: true });
+    } else {
+      results.push({ branch, updated: false, error: errOut });
+    }
+  }
+
+  return results;
+}
+
 /**
  * Returns true if `origin` remote exists.
  */

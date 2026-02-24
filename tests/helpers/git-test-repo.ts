@@ -21,6 +21,17 @@ export interface GitTestRepo {
   setupOrigin: () => Promise<{ originPath: string }>;
   /** Push the given branch to origin. */
   push: (branch: string) => Promise<void>;
+  /**
+   * Advance the remote branch by committing directly into a secondary clone of
+   * origin (simulating a collaborator pushing). Then fetch in local so tracking
+   * info reflects `[behind N]` without pulling.
+   */
+  advanceRemote: (
+    branch: string,
+    filename: string,
+    content: string,
+    message: string,
+  ) => Promise<void>;
 }
 
 async function run(
@@ -117,7 +128,28 @@ export async function createTempGitRepo(): Promise<GitTestRepo> {
     },
 
     async push(branch: string) {
-      await run(['git', 'push', 'origin', branch], path);
+      await run(['git', 'push', '--set-upstream', 'origin', branch], path);
+    },
+
+    async advanceRemote(branch: string, filename: string, content: string, message: string) {
+      // Clone origin into a temp dir, commit there, push back, then fetch locally
+      const tmpClone = await Deno.makeTempDir({ prefix: 'broom-clone-' });
+      try {
+        // Get the origin path from our remote config
+        const { stdout: originUrl } = await run(['git', 'remote', 'get-url', 'origin'], path);
+        await run(['git', 'clone', originUrl, tmpClone], tmpClone);
+        await run(['git', 'config', 'user.email', 'collaborator@example.com'], tmpClone);
+        await run(['git', 'config', 'user.name', 'Collaborator'], tmpClone);
+        await run(['git', 'checkout', branch], tmpClone);
+        await Deno.writeTextFile(join(tmpClone, filename), content);
+        await run(['git', 'add', filename], tmpClone);
+        await run(['git', 'commit', '-m', message], tmpClone);
+        await run(['git', 'push', 'origin', branch], tmpClone);
+        // Fetch locally so origin/<branch> tracking ref is updated
+        await run(['git', 'fetch', 'origin'], path);
+      } finally {
+        await Deno.remove(tmpClone, { recursive: true }).catch(() => {});
+      }
     },
   };
 

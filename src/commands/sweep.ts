@@ -22,6 +22,7 @@ import {
   AnalyzeProgress,
   BranchInfo,
   BranchStatus,
+  fastForwardBranches,
   getLocalBranches,
   hasOriginRemote,
 } from '../git/branches.ts';
@@ -167,6 +168,24 @@ export async function sweepCommand(
 
   console.log('Fetching from origin...');
   await fetchOrigin();
+
+  console.log('Fast-forwarding local branches...');
+  const ffResults = await fastForwardBranches();
+  const ffUpdated = ffResults.filter((r) => r.updated);
+  const ffFailed = ffResults.filter((r) => !r.updated);
+  if (ffUpdated.length > 0) {
+    for (const r of ffUpdated) {
+      console.log(green(`  updated  ${r.branch}`));
+    }
+  }
+  if (ffFailed.length > 0) {
+    for (const r of ffFailed) {
+      console.error(red(`  failed   ${r.branch}: ${r.error}`));
+    }
+  }
+  if (ffResults.length === 0) {
+    console.log(dim('  nothing to update'));
+  }
 
   const localBranches = await getLocalBranches();
   if (localBranches.length === 0) {
