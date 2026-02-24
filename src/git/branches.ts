@@ -34,12 +34,19 @@ export interface BranchInfo {
   status: BranchStatus;
 }
 
-async function git(args: string[], cwd?: string): Promise<{ success: boolean; stdout: string }> {
+export interface AnalyzeProgress {
+  branch: string;
+  current: number;
+  total: number;
+}
+
+export type ProgressCallback = (progress: AnalyzeProgress) => void;
+
+async function git(args: string[]): Promise<{ success: boolean; stdout: string }> {
   const cmd = new Deno.Command('git', {
     args,
     stdout: 'piped',
     stderr: 'piped',
-    ...(cwd ? { cwd } : {}),
   });
   const output = await cmd.output();
   return {
@@ -51,7 +58,7 @@ async function git(args: string[], cwd?: string): Promise<{ success: boolean; st
 /**
  * Returns the list of local branch names, excluding `main`.
  */
-async function getLocalBranches(): Promise<string[]> {
+export async function getLocalBranches(): Promise<string[]> {
   const { stdout } = await git(['branch', '--list', '--format=%(refname:short)']);
   return stdout
     .split('\n')
@@ -71,85 +78,9 @@ export async function hasOriginRemote(): Promise<boolean> {
 }
 
 /**
- * Collect patch-ids (sha + patch-id pairs) for commits reachable from `ref` but not from `main`.
- * The patch-id is a hash of the diff, making it identical across rebase/squash.
- */
-async function getPatchIds(ref: string): Promise<Map<string, string>> {
-  // git log produces commit SHAs; git patch-id reads diff-trees from stdin
-  const logResult = await git(['log', '--format=%H', `main..${ref}`]);
-  if (!logResult.stdout) {
-    return new Map();
-  }
-  const shas = logResult.stdout.split('\n').filter((s) => s.length > 0);
-
-  const patchIds = new Map<string, string>(); // sha → patch-id
-
-  for (const sha of shas) {
-    // Get the diff for this single commit
-    const diffResult = await git(['diff-tree', '--stdin', '-p', sha]);
-    if (!diffResult.stdout) continue;
-
-    // Feed the diff through git patch-id
-    const patchIdCmd = new Deno.Command('git', {
-      args: ['patch-id', '--stable'],
-      stdin: 'piped',
-      stdout: 'piped',
-      stderr: 'null',
-    });
-    const patchIdProc = patchIdCmd.spawn();
-    const writer = patchIdProc.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(diffResult.stdout + '\n'));
-    await writer.close();
-    const patchIdOutput = await patchIdProc.output();
-    const line = new TextDecoder().decode(patchIdOutput.stdout).trim();
-    if (line) {
-      const [pid] = line.split(' ');
-      patchIds.set(sha, pid);
-    }
-  }
-
-  return patchIds;
-}
-
-/**
- * Returns the set of patch-ids already in `main`.
- */
-async function getMainPatchIds(): Promise<Set<string>> {
-  // Get all commits reachable from main
-  const logResult = await git(['log', '--format=%H', 'main']);
-  if (!logResult.stdout) return new Set();
-
-  const shas = logResult.stdout.split('\n').filter((s) => s.length > 0);
-  const set = new Set<string>();
-
-  for (const sha of shas) {
-    const diffResult = await git(['diff-tree', '--stdin', '-p', sha]);
-    if (!diffResult.stdout) continue;
-
-    const patchIdCmd = new Deno.Command('git', {
-      args: ['patch-id', '--stable'],
-      stdin: 'piped',
-      stdout: 'piped',
-      stderr: 'null',
-    });
-    const patchIdProc = patchIdCmd.spawn();
-    const writer = patchIdProc.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(diffResult.stdout + '\n'));
-    await writer.close();
-    const patchIdOutput = await patchIdProc.output();
-    const line = new TextDecoder().decode(patchIdOutput.stdout).trim();
-    if (line) {
-      const [pid] = line.split(' ');
-      set.add(pid);
-    }
-  }
-
-  return set;
-}
-
-/**
  * Returns true if the branch is already merged into main via git's ancestry check.
- * This covers regular merge commits (fast-forward and recursive).
+ * This covers regular merge commits (fast-forward and recursive). It is the fast
+ * path: if the branch tip is an ancestor of main, no further analysis is needed.
  */
 async function isMergedByAncestry(branch: string): Promise<boolean> {
   const { success } = await git(['merge-base', '--is-ancestor', branch, 'main']);
@@ -157,114 +88,97 @@ async function isMergedByAncestry(branch: string): Promise<boolean> {
 }
 
 /**
- * Returns true if all commits on `branch` (not in main) have their diff already in main,
- * which detects squash merges and rebases.
+ * Returns true if all commits unique to `branch` (not in `main`) have an equivalent
+ * patch already present in `main` — i.e. the branch was squash-merged or rebased.
+ *
+ * Uses `git log --left-right --cherry-mark main...branch`:
+ *   `>` — commit is unique to branch (not in main)
+ *   `=` — commit has an equivalent patch already in main
+ *
+ * If every branch-side commit is marked `=` (none are `>`), the branch is fully merged.
+ * This is O(commits since the branch diverged), not O(all of main).
  */
-async function isMergedByPatchId(
-  branch: string,
-  mainPatchIds: Set<string>,
-): Promise<boolean> {
-  const branchPatchIds = await getPatchIds(branch);
-  if (branchPatchIds.size === 0) {
-    // No unique commits — already merged by ancestry
-    return true;
-  }
-  for (const pid of branchPatchIds.values()) {
-    if (!mainPatchIds.has(pid)) {
-      return false;
-    }
-  }
-  return true;
+async function isMergedByCherryMark(branch: string): Promise<boolean> {
+  const { stdout } = await git([
+    'log',
+    '--left-right',
+    '--cherry-mark',
+    '--format=%m',
+    `main...${branch}`,
+  ]);
+  if (!stdout) return true; // no commits on either side
+
+  const lines = stdout.split('\n').filter((l) => l.length > 0);
+  // Branch-side commits start with `>` (unique) or `=` (already in main)
+  const branchSide = lines.filter((l) => l === '>' || l === '=');
+  if (branchSide.length === 0) return true; // no branch-unique commits
+  // Merged if every branch-side commit is equivalent (=), none are unique (>)
+  return branchSide.every((l) => l === '=');
 }
 
 /**
- * Returns true if the branch has commits not pushed to origin (i.e. no remote tracking branch
- * or local commits ahead of origin).
+ * Returns true if the branch has commits not pushed to origin (i.e. no remote tracking
+ * branch, or local commits ahead of origin).
  */
 async function hasUnpushedCommits(branch: string): Promise<boolean> {
-  // Check if there's a remote tracking branch
-  const trackingResult = await git([
-    'rev-parse',
-    '--verify',
-    `origin/${branch}`,
-  ]);
+  const trackingResult = await git(['rev-parse', '--verify', `origin/${branch}`]);
   if (!trackingResult.success) {
-    // No remote tracking branch at all — branch is purely local
-    // But we only call this when the branch is NOT merged, so this means it has local commits
+    // No remote tracking branch — branch is purely local with unmerged commits
     return true;
   }
-
-  // Count commits ahead of origin
   const aheadResult = await git(['rev-list', '--count', `origin/${branch}..${branch}`]);
-  const ahead = parseInt(aheadResult.stdout, 10);
-  return ahead > 0;
+  return parseInt(aheadResult.stdout, 10) > 0;
 }
 
 /**
- * Returns true if `main` has commits that are not in `branch` (i.e. branch needs rebasing).
+ * Returns true if `main` has commits that are not in `branch` (branch needs rebasing).
  */
 async function needsRebase(branch: string): Promise<boolean> {
   const result = await git(['rev-list', '--count', `${branch}..main`]);
-  const count = parseInt(result.stdout, 10);
-  return count > 0;
+  return parseInt(result.stdout, 10) > 0;
 }
 
-export interface AnalyzeProgress {
-  branch: string;
-  current: number;
-  total: number;
+/**
+ * Classify a single branch. Classification order (first match wins):
+ * 1. `merged`       — branch tip is ancestor of main, OR all unique patches are in main
+ * 2. `unpushed`     — branch has commits not pushed to origin
+ * 3. `needs-rebase` — main has commits not in branch
+ * 4. `active`       — branch is up to date with origin and has unique commits
+ */
+async function classifyBranch(branch: string): Promise<BranchStatus> {
+  if (await isMergedByAncestry(branch)) return 'merged';
+  if (await isMergedByCherryMark(branch)) return 'merged';
+  if (await hasUnpushedCommits(branch)) return 'unpushed';
+  if (await needsRebase(branch)) return 'needs-rebase';
+  return 'active';
 }
-
-export type ProgressCallback = (progress: AnalyzeProgress) => void;
 
 /**
  * Analyze all local branches (excluding `main`) and classify each one.
  *
  * Prerequisites: caller must ensure `git fetch origin` has been run before calling this.
  *
- * Classification order (first match wins):
- * 1. `merged`       — branch tip is ancestor of main, OR all unique diffs are in main
- * 2. `unpushed`     — branch has commits not pushed to origin
- * 3. `needs-rebase` — main has commits not in branch
- * 4. `active`       — branch is up to date and has unique commits
+ * Branches are analyzed in parallel for speed. The onProgress callback (if provided)
+ * is called after each branch completes — order may not match the original branch list.
  *
  * @param onProgress  Optional callback invoked after each branch is classified.
  */
 export async function analyzeBranches(onProgress?: ProgressCallback): Promise<BranchInfo[]> {
   const branches = await getLocalBranches();
-  if (branches.length === 0) {
-    return [];
-  }
+  if (branches.length === 0) return [];
 
-  // Pre-compute main patch-ids once for efficiency
-  const mainPatchIds = await getMainPatchIds();
-
-  const results: BranchInfo[] = [];
   const total = branches.length;
+  let current = 0;
 
-  for (let i = 0; i < total; i++) {
-    const branch = branches[i];
-    let status: BranchStatus;
+  const results = await Promise.all(
+    branches.map(async (branch) => {
+      const status = await classifyBranch(branch);
+      onProgress?.({ branch, current: ++current, total });
+      return { name: branch, status };
+    }),
+  );
 
-    // 1. Merged check (ancestry first — fast path)
-    if (await isMergedByAncestry(branch)) {
-      status = 'merged';
-    } else if (await isMergedByPatchId(branch, mainPatchIds)) {
-      status = 'merged';
-    } else if (await hasUnpushedCommits(branch)) {
-      // 2. Unpushed
-      status = 'unpushed';
-    } else if (await needsRebase(branch)) {
-      // 3. Needs rebase
-      status = 'needs-rebase';
-    } else {
-      // 4. Active (has commits not in main, is up-to-date with origin)
-      status = 'active';
-    }
-
-    results.push({ name: branch, status });
-    onProgress?.({ branch, current: i + 1, total });
-  }
-
+  // Restore original branch order (Promise.all preserves index order already,
+  // but current counter may fire out of order — that's fine for progress display)
   return results;
 }

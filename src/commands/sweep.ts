@@ -22,6 +22,7 @@ import {
   AnalyzeProgress,
   BranchInfo,
   BranchStatus,
+  getLocalBranches,
   hasOriginRemote,
 } from '../git/branches.ts';
 import { isGitRepo } from '../git/repo.ts';
@@ -82,11 +83,13 @@ function isTTY(): boolean {
 /**
  * Render a single progress line.
  * On a TTY the line is rewritten in place; otherwise a new line is printed.
+ * Branches are analyzed in parallel so arrival order is non-deterministic —
+ * the line shows the most recently completed branch name.
  */
 function renderProgress(p: AnalyzeProgress): void {
   const pct = Math.round((p.current / p.total) * 100);
   const bar = `[${p.current}/${p.total}]`;
-  const line = `  Analyzing... ${bar} ${pct}%  ${dim(p.branch)}`;
+  const line = `  Analyzing ${bar} ${pct}%  ${dim(p.branch)}`;
   if (isTTY()) {
     Deno.stdout.writeSync(new TextEncoder().encode(`\r${line}`));
   } else {
@@ -165,15 +168,35 @@ export async function sweepCommand(
   console.log('Fetching from origin...');
   await fetchOrigin();
 
-  console.log('Analyzing branches...');
+  const localBranches = await getLocalBranches();
+  if (localBranches.length === 0) {
+    console.log('No local branches found (besides main). Nothing to sweep.');
+    return;
+  }
+  console.log(
+    `Found ${localBranches.length} local branch${
+      localBranches.length === 1 ? '' : 'es'
+    }. Analyzing...`,
+  );
+
   const onProgress = opts.progress ? renderProgress : undefined;
   const branches = await analyzeBranches(onProgress);
   if (opts.progress) clearProgress();
 
-  if (branches.length === 0) {
-    console.log('No local branches found (besides main). Nothing to sweep.');
-    return;
-  }
+  const mergedCount = branches.filter((b) => b.status === 'merged').length;
+  const unpushedCount = branches.filter((b) => b.status === 'unpushed').length;
+  const needsRebaseCount = branches.filter((b) => b.status === 'needs-rebase').length;
+  const activeCount = branches.filter((b) => b.status === 'active').length;
+
+  const summary = [
+    mergedCount > 0 ? dim(`${mergedCount} merged`) : '',
+    unpushedCount > 0 ? yellow(`${unpushedCount} unpushed`) : '',
+    needsRebaseCount > 0 ? red(`${needsRebaseCount} needs rebase`) : '',
+    activeCount > 0 ? cyan(`${activeCount} active`) : '',
+  ]
+    .filter(Boolean)
+    .join(', ');
+  console.log(`Done. ${summary}\n`);
 
   const checkboxOptions = branches.map((b) => ({
     name: formatOption(b),
