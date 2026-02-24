@@ -24,7 +24,9 @@ import {
   BranchStatus,
   fastForwardBranches,
   getLocalBranches,
+  getWorktrees,
   hasOriginRemote,
+  WorktreeInfo,
 } from '../git/branches.ts';
 import { isGitRepo } from '../git/repo.ts';
 import {
@@ -71,9 +73,10 @@ function colorStatus(status: BranchStatus): string {
   }
 }
 
-function formatOption(branch: BranchInfo): string {
+function formatOption(branch: BranchInfo, worktree?: WorktreeInfo): string {
   const label = colorStatus(branch.status);
-  return `${branch.name.padEnd(40)} ${label}`;
+  const wtSuffix = worktree ? `  ${dim('[worktree]')}` : '';
+  return `${branch.name.padEnd(40)} ${label}${wtSuffix}`;
 }
 
 /** True when stdout is an interactive terminal (progress rewriting is safe). */
@@ -118,7 +121,28 @@ async function fetchOrigin(): Promise<void> {
   }
 }
 
-async function deleteBranch(branch: string): Promise<void> {
+async function removeWorktree(worktreePath: string): Promise<void> {
+  const cmd = new Deno.Command('git', {
+    args: ['worktree', 'remove', '--force', worktreePath],
+    stdout: 'null',
+    stderr: 'piped',
+  });
+  const output = await cmd.output();
+  if (!output.success) {
+    const stderr = new TextDecoder().decode(output.stderr).trim();
+    throw new Error(`Failed to remove worktree at ${worktreePath}: ${stderr}`);
+  }
+}
+
+/**
+ * Delete a local branch. If it is checked out in a linked worktree,
+ * remove the worktree first via `git worktree remove --force`, then
+ * delete the branch ref.
+ */
+async function deleteBranch(branch: string, worktree?: WorktreeInfo): Promise<void> {
+  if (worktree) {
+    await removeWorktree(worktree.path);
+  }
   const cmd = new Deno.Command('git', {
     args: ['branch', '-D', branch],
     stdout: 'null',
@@ -198,6 +222,9 @@ export async function sweepCommand(
     }. Analyzing...`,
   );
 
+  // Collect worktree info once — used for display and deletion
+  const worktrees = await getWorktrees();
+
   const onProgress = opts.progress ? renderProgress : undefined;
   const branches = await analyzeBranches(onProgress);
   if (opts.progress) clearProgress();
@@ -206,22 +233,27 @@ export async function sweepCommand(
   const unpushedCount = branches.filter((b) => b.status === 'unpushed').length;
   const needsRebaseCount = branches.filter((b) => b.status === 'needs-rebase').length;
   const activeCount = branches.filter((b) => b.status === 'active').length;
+  const worktreeCount = worktrees.size;
 
   const summary = [
     mergedCount > 0 ? dim(`${mergedCount} merged`) : '',
     unpushedCount > 0 ? yellow(`${unpushedCount} unpushed`) : '',
     needsRebaseCount > 0 ? red(`${needsRebaseCount} needs rebase`) : '',
     activeCount > 0 ? cyan(`${activeCount} active`) : '',
+    worktreeCount > 0 ? dim(`${worktreeCount} in worktree`) : '',
   ]
     .filter(Boolean)
     .join(', ');
   console.log(`Done. ${summary}\n`);
 
-  const checkboxOptions = branches.map((b) => ({
-    name: formatOption(b),
-    value: b.name,
-    checked: b.status === 'merged',
-  }));
+  const checkboxOptions = branches.map((b) => {
+    const wt = worktrees.get(b.name);
+    return {
+      name: formatOption(b, wt),
+      value: b.name,
+      checked: b.status === 'merged',
+    };
+  });
 
   const selected: string[] = await Checkbox.prompt({
     message: 'Select branches to delete (Space to toggle, Enter to confirm):',
@@ -234,9 +266,20 @@ export async function sweepCommand(
     return;
   }
 
-  console.log(`\nBranches to delete (${selected.length}):`);
-  for (const branch of selected) {
-    console.log(`  ${branch}`);
+  // Warn if any selected branches have associated worktrees
+  const selectedWithWorktrees = selected.filter((b) => worktrees.has(b));
+  if (selectedWithWorktrees.length > 0) {
+    console.log(
+      `\n${yellow('Warning:')} ${selectedWithWorktrees.length} selected branch${
+        selectedWithWorktrees.length === 1 ? '' : 'es'
+      } ${selectedWithWorktrees.length === 1 ? 'is' : 'are'} checked out in a worktree:`,
+    );
+    for (const b of selectedWithWorktrees) {
+      console.log(`  ${b}  ${dim(worktrees.get(b)!.path)}`);
+    }
+    console.log(dim('  The worktree will be removed along with the branch.\n'));
+  } else {
+    console.log('');
   }
 
   const confirmed = await Confirm.prompt({
@@ -252,9 +295,11 @@ export async function sweepCommand(
   console.log('');
   let failed = 0;
   for (const branch of selected) {
+    const wt = worktrees.get(branch);
     try {
-      await deleteBranch(branch);
-      console.log(green(`  deleted  ${branch}`));
+      await deleteBranch(branch, wt);
+      const note = wt ? dim(` (worktree at ${wt.path} removed)`) : '';
+      console.log(green(`  deleted  ${branch}`) + note);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(red(`  failed   ${branch}: ${msg}`));

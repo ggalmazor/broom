@@ -55,6 +55,46 @@ async function git(args: string[]): Promise<{ success: boolean; stdout: string }
   };
 }
 
+export interface WorktreeInfo {
+  /** Absolute path to the worktree directory. */
+  path: string;
+  /** Branch checked out in this worktree, or null for detached HEAD. */
+  branch: string | null;
+}
+
+/**
+ * Returns a map of branch name → worktree path for all linked worktrees
+ * (excluding the main worktree). Detached-HEAD worktrees are omitted.
+ */
+export async function getWorktrees(): Promise<Map<string, WorktreeInfo>> {
+  const { stdout } = await git(['worktree', 'list', '--porcelain']);
+  const map = new Map<string, WorktreeInfo>();
+  if (!stdout) return map;
+
+  // Each worktree entry is separated by a blank line
+  const entries = stdout.split('\n\n').filter((e) => e.trim().length > 0);
+  let isFirst = true;
+
+  for (const entry of entries) {
+    if (isFirst) {
+      // Skip the main worktree (first entry)
+      isFirst = false;
+      continue;
+    }
+    let path = '';
+    let branch: string | null = null;
+    for (const line of entry.split('\n')) {
+      if (line.startsWith('worktree ')) path = line.slice('worktree '.length);
+      if (line.startsWith('branch refs/heads/')) branch = line.slice('branch refs/heads/'.length);
+    }
+    if (path && branch) {
+      map.set(branch, { path, branch });
+    }
+  }
+
+  return map;
+}
+
 /**
  * Returns the list of local branch names, excluding `main`.
  */
@@ -77,13 +117,16 @@ export interface FastForwardResult {
  * behind it (no local-only commits), fast-forward the local ref without
  * requiring a checkout. Uses `git fetch origin <branch>:<branch>`.
  *
- * Branches that are ahead, diverged, or have no upstream are skipped silently.
- * The currently checked-out branch is also skipped (git refuses to fast-forward it
- * this way; the user can `git pull` that themselves).
+ * Branches that are ahead, diverged, have no upstream, are currently checked
+ * out in any worktree (including the main one), are skipped silently.
  *
  * Returns one result per branch that was attempted.
  */
 export async function fastForwardBranches(): Promise<FastForwardResult[]> {
+  // Collect branches checked out in any worktree (git refuses to ff those)
+  const worktrees = await getWorktrees();
+  const worktreeBranches = new Set(worktrees.keys());
+
   // Get all local branches with their upstream tracking status in one shot
   const { stdout } = await git([
     'branch',
@@ -102,8 +145,11 @@ export async function fastForwardBranches(): Promise<FastForwardResult[]> {
     const track = parts[2] ?? '';
     const head = parts[3] ?? '';
 
-    // Skip currently checked-out branch (git fetch <ref>:<ref> fails on HEAD)
+    // Skip the branch checked out in the main worktree
     if (head === '*') continue;
+
+    // Skip branches checked out in any linked worktree
+    if (worktreeBranches.has(branch)) continue;
 
     // Skip branches with no upstream or whose remote was pruned
     if (!upstream || track === '[gone]') continue;

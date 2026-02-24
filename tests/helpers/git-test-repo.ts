@@ -17,6 +17,8 @@ export interface GitTestRepo {
   rebaseBranch: (branch: string) => Promise<void>;
   /** Add a remote pointing at `url`. */
   addRemote: (name: string, url: string) => Promise<void>;
+  /** Add a linked worktree for `branch` at `wtPath`. */
+  createWorktree: (branch: string, wtPath: string) => Promise<void>;
   /** Simulate an origin by bare-cloning this repo and adding it as a remote. */
   setupOrigin: () => Promise<{ originPath: string }>;
   /** Push the given branch to origin. */
@@ -112,6 +114,10 @@ export async function createTempGitRepo(): Promise<GitTestRepo> {
 
     async addRemote(name: string, url: string) {
       await run(['git', 'remote', 'add', name, url], path);
+    },
+
+    async createWorktree(branch: string, wtPath: string) {
+      await run(['git', 'worktree', 'add', wtPath, branch], path);
     },
 
     async setupOrigin() {
