@@ -209,6 +209,14 @@ async function needsRebase(branch: string): Promise<boolean> {
   return count > 0;
 }
 
+export interface AnalyzeProgress {
+  branch: string;
+  current: number;
+  total: number;
+}
+
+export type ProgressCallback = (progress: AnalyzeProgress) => void;
+
 /**
  * Analyze all local branches (excluding `main`) and classify each one.
  *
@@ -219,8 +227,10 @@ async function needsRebase(branch: string): Promise<boolean> {
  * 2. `unpushed`     — branch has commits not pushed to origin
  * 3. `needs-rebase` — main has commits not in branch
  * 4. `active`       — branch is up to date and has unique commits
+ *
+ * @param onProgress  Optional callback invoked after each branch is classified.
  */
-export async function analyzeBranches(): Promise<BranchInfo[]> {
+export async function analyzeBranches(onProgress?: ProgressCallback): Promise<BranchInfo[]> {
   const branches = await getLocalBranches();
   if (branches.length === 0) {
     return [];
@@ -230,8 +240,10 @@ export async function analyzeBranches(): Promise<BranchInfo[]> {
   const mainPatchIds = await getMainPatchIds();
 
   const results: BranchInfo[] = [];
+  const total = branches.length;
 
-  for (const branch of branches) {
+  for (let i = 0; i < total; i++) {
+    const branch = branches[i];
     let status: BranchStatus;
 
     // 1. Merged check (ancestry first — fast path)
@@ -251,6 +263,7 @@ export async function analyzeBranches(): Promise<BranchInfo[]> {
     }
 
     results.push({ name: branch, status });
+    onProgress?.({ branch, current: i + 1, total });
   }
 
   return results;

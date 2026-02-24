@@ -1,6 +1,6 @@
 import { assertEquals } from '@std/assert';
 import { createTempGitRepo } from '../helpers/git-test-repo.ts';
-import { analyzeBranches } from '../../src/git/branches.ts';
+import { analyzeBranches, AnalyzeProgress } from '../../src/git/branches.ts';
 
 Deno.test('analyzeBranches returns empty array when no branches besides main', async () => {
   const repo = await createTempGitRepo();
@@ -210,6 +210,60 @@ Deno.test('analyzeBranches handles multiple branches with mixed statuses', async
     assertEquals(byName['active-branch'], 'active');
 
     await Deno.remove(originPath, { recursive: true });
+  } finally {
+    Deno.chdir(originalCwd);
+    await repo.cleanup();
+  }
+});
+
+Deno.test('analyzeBranches invokes onProgress callback for each branch', async () => {
+  const repo = await createTempGitRepo();
+  const originalCwd = Deno.cwd();
+
+  try {
+    Deno.chdir(repo.path);
+
+    await repo.createBranch('branch-a');
+    await repo.checkout('branch-a');
+    await repo.commitFile('a.txt', 'a\n', 'Commit on branch-a');
+    await repo.checkout('main');
+
+    await repo.createBranch('branch-b');
+    await repo.checkout('branch-b');
+    await repo.commitFile('b.txt', 'b\n', 'Commit on branch-b');
+    await repo.checkout('main');
+
+    const events: AnalyzeProgress[] = [];
+    await analyzeBranches((p) => events.push(p));
+
+    assertEquals(events.length, 2);
+    assertEquals(events[0].current, 1);
+    assertEquals(events[0].total, 2);
+    assertEquals(events[1].current, 2);
+    assertEquals(events[1].total, 2);
+    // branch names must match what was analyzed
+    assertEquals(new Set(events.map((e) => e.branch)), new Set(['branch-a', 'branch-b']));
+  } finally {
+    Deno.chdir(originalCwd);
+    await repo.cleanup();
+  }
+});
+
+Deno.test('analyzeBranches works without onProgress callback', async () => {
+  const repo = await createTempGitRepo();
+  const originalCwd = Deno.cwd();
+
+  try {
+    Deno.chdir(repo.path);
+
+    await repo.createBranch('feature');
+    await repo.checkout('feature');
+    await repo.commitFile('f.txt', 'f\n', 'Commit on feature');
+    await repo.checkout('main');
+
+    // Should not throw when no callback provided
+    const result = await analyzeBranches();
+    assertEquals(result.length, 1);
   } finally {
     Deno.chdir(originalCwd);
     await repo.cleanup();

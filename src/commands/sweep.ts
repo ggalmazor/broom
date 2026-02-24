@@ -17,8 +17,13 @@
  */
 
 import { Checkbox, Confirm } from '@cliffy/prompt';
-import { analyzeBranches, BranchInfo, BranchStatus } from '../git/branches.ts';
-import { hasOriginRemote } from '../git/branches.ts';
+import {
+  analyzeBranches,
+  AnalyzeProgress,
+  BranchInfo,
+  BranchStatus,
+  hasOriginRemote,
+} from '../git/branches.ts';
 import { isGitRepo } from '../git/repo.ts';
 import {
   DeleteBranchError,
@@ -69,6 +74,33 @@ function formatOption(branch: BranchInfo): string {
   return `${branch.name.padEnd(40)} ${label}`;
 }
 
+/** True when stdout is an interactive terminal (progress rewriting is safe). */
+function isTTY(): boolean {
+  return Deno.stdout.isTerminal();
+}
+
+/**
+ * Render a single progress line.
+ * On a TTY the line is rewritten in place; otherwise a new line is printed.
+ */
+function renderProgress(p: AnalyzeProgress): void {
+  const pct = Math.round((p.current / p.total) * 100);
+  const bar = `[${p.current}/${p.total}]`;
+  const line = `  Analyzing... ${bar} ${pct}%  ${dim(p.branch)}`;
+  if (isTTY()) {
+    Deno.stdout.writeSync(new TextEncoder().encode(`\r${line}`));
+  } else {
+    console.log(line);
+  }
+}
+
+/** Clear the progress line from the terminal. */
+function clearProgress(): void {
+  if (isTTY()) {
+    Deno.stdout.writeSync(new TextEncoder().encode('\r\x1b[K'));
+  }
+}
+
 async function fetchOrigin(): Promise<void> {
   const cmd = new Deno.Command('git', {
     args: ['fetch', 'origin', '--prune'],
@@ -115,11 +147,13 @@ export async function sweepBranchesNonInteractive(branches: string[]): Promise<v
  *
  * 1. Verifies we're in a git repo with an origin remote.
  * 2. Fetches from origin.
- * 3. Analyzes all local branches.
+ * 3. Analyzes all local branches (with optional progress output).
  * 4. Shows a multi-select list pre-selecting merged branches.
  * 5. Asks for confirmation, then deletes.
  */
-export async function sweepCommand(): Promise<void> {
+export async function sweepCommand(
+  opts: { progress: boolean } = { progress: true },
+): Promise<void> {
   if (!(await isGitRepo())) {
     throw new NotInGitRepoError();
   }
@@ -131,20 +165,17 @@ export async function sweepCommand(): Promise<void> {
   console.log('Fetching from origin...');
   await fetchOrigin();
 
-  console.log('Analyzing branches...\n');
-  const branches = await analyzeBranches();
+  console.log('Analyzing branches...');
+  const onProgress = opts.progress ? renderProgress : undefined;
+  const branches = await analyzeBranches(onProgress);
+  if (opts.progress) clearProgress();
 
   if (branches.length === 0) {
     console.log('No local branches found (besides main). Nothing to sweep.');
     return;
   }
 
-  // Pre-select merged branches for deletion
-  const defaultSelected = branches
-    .filter((b) => b.status === 'merged')
-    .map((b) => b.name);
-
-  const options = branches.map((b) => ({
+  const checkboxOptions = branches.map((b) => ({
     name: formatOption(b),
     value: b.name,
     checked: b.status === 'merged',
@@ -152,7 +183,7 @@ export async function sweepCommand(): Promise<void> {
 
   const selected: string[] = await Checkbox.prompt({
     message: 'Select branches to delete (Space to toggle, Enter to confirm):',
-    options,
+    options: checkboxOptions,
     search: true,
   });
 
@@ -195,7 +226,4 @@ export async function sweepCommand(): Promise<void> {
       (failed > 0 ? red(`, ${failed} failed`) : '') +
       '.',
   );
-
-  // Suppress unused import warning — defaultSelected is referenced here
-  void defaultSelected;
 }
