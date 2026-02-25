@@ -17,16 +17,16 @@ Broom fetches from `origin`, analyzes every local branch against `main`, and pre
 ## Installation
 
 ```sh
-deno run --allow-run --allow-read --allow-write --allow-env https://raw.githubusercontent.com/ggalmazor/broom/main/scripts/install.ts
+curl -fsSL https://raw.githubusercontent.com/ggalmazor/broom/main/install.sh | bash
 ```
 
-Or compile a binary for your platform:
+To install a specific version:
 
 ```sh
-git clone https://github.com/ggalmazor/broom
-cd broom
-deno task compile
+curl -fsSL https://raw.githubusercontent.com/ggalmazor/broom/main/install.sh | bash -s 1.0.0
 ```
+
+Supported platforms: macOS (arm64, x86_64), Linux (x86_64).
 
 ## Usage
 
