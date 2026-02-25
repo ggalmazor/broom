@@ -62,8 +62,6 @@ Deno.test('analyzeBranches detects a branch merged via squash merge', async () =
   }
 });
 
-
-
 Deno.test('analyzeBranches detects a multi-commit branch merged via squash merge', async () => {
   const repo = await createTempGitRepo();
   const originalCwd = Deno.cwd();
