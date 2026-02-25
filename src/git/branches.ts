@@ -229,6 +229,36 @@ async function isMergedByCherryMark(branch: string): Promise<boolean> {
 }
 
 /**
+ * Returns true if every file the branch touched (relative to the merge-base with main)
+ * has the same blob SHA in main as it does in the branch tip.
+ *
+ * This detects squash merges where --cherry-mark fails: the branch commits are collapsed
+ * into a single commit on main, so no individual patch matches, but the resulting file
+ * content is identical. Uses git ls-tree for blob comparison — no diff driver involved,
+ * unaffected by gitattributes or tools like difft.
+ */
+async function isMergedByContent(branch: string): Promise<boolean> {
+  const mergeBaseResult = await git(['merge-base', branch, 'main']);
+  if (!mergeBaseResult.success) return false;
+  const mergeBase = mergeBaseResult.stdout;
+
+  const changedResult = await git(['diff-tree', '-r', '--name-only', mergeBase, branch]);
+  if (!changedResult.success || !changedResult.stdout) return false;
+  const files = changedResult.stdout.split('\n').filter((l) => l.length > 0);
+
+  for (const file of files) {
+    const branchBlob = await git(['ls-tree', branch, '--', file]);
+    const mainBlob = await git(['ls-tree', 'main', '--', file]);
+    const branchSha = branchBlob.stdout.split(/\s+/)[2] ?? '';
+    const mainSha = mainBlob.stdout.split(/\s+/)[2] ?? '';
+    // File exists in branch but is absent from or different in main → not merged
+    if (branchSha && branchSha !== mainSha) return false;
+  }
+
+  return true;
+}
+
+/**
  * Returns true if the branch has commits not pushed to origin (i.e. no remote tracking
  * branch, or local commits ahead of origin).
  */
@@ -252,14 +282,17 @@ async function needsRebase(branch: string): Promise<boolean> {
 
 /**
  * Classify a single branch. Classification order (first match wins):
- * 1. `merged`       — branch tip is ancestor of main, OR all unique patches are in main
- * 2. `unpushed`     — branch has commits not pushed to origin
- * 3. `needs-rebase` — main has commits not in branch
- * 4. `active`       — branch is up to date with origin and has unique commits
+ * 1. `merged`       — branch tip is ancestor of main (merge commit / fast-forward)
+ * 2. `merged`       — all branch-side commits have equivalent patches in main (rebase)
+ * 3. `merged`       — all files the branch touched have identical blobs in main (squash merge)
+ * 4. `unpushed`     — branch has commits not pushed to origin
+ * 5. `needs-rebase` — main has commits not in branch
+ * 6. `active`       — branch is up to date with origin and has unique commits
  */
 async function classifyBranch(branch: string): Promise<BranchStatus> {
   if (await isMergedByAncestry(branch)) return 'merged';
   if (await isMergedByCherryMark(branch)) return 'merged';
+  if (await isMergedByContent(branch)) return 'merged';
   if (await hasUnpushedCommits(branch)) return 'unpushed';
   if (await needsRebase(branch)) return 'needs-rebase';
   return 'active';

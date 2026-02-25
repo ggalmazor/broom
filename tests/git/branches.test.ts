@@ -62,6 +62,32 @@ Deno.test('analyzeBranches detects a branch merged via squash merge', async () =
   }
 });
 
+
+
+Deno.test('analyzeBranches detects a multi-commit branch merged via squash merge', async () => {
+  const repo = await createTempGitRepo();
+  const originalCwd = Deno.cwd();
+
+  try {
+    Deno.chdir(repo.path);
+
+    await repo.createBranch('feature');
+    await repo.checkout('feature');
+    await repo.commitFile('feature-a.txt', 'feature a content\n', 'Add feature part A');
+    await repo.commitFile('feature-b.txt', 'feature b content\n', 'Add feature part B');
+    await repo.checkout('main');
+    await repo.squashMerge('feature', 'Squash merge feature branch');
+
+    const result = await analyzeBranches();
+    assertEquals(result.length, 1);
+    assertEquals(result[0].name, 'feature');
+    assertEquals(result[0].status, 'merged');
+  } finally {
+    Deno.chdir(originalCwd);
+    await repo.cleanup();
+  }
+});
+
 Deno.test('analyzeBranches detects a branch merged via rebase', async () => {
   const repo = await createTempGitRepo();
   const originalCwd = Deno.cwd();

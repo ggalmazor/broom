@@ -39,6 +39,11 @@ const program = new Command()
   })
   .command('sweep', 'Fetch origin, analyze branches, and interactively delete stale ones')
   .option('--no-progress', 'Disable per-branch progress output during analysis')
-  .action((opts) => runCommand(() => sweepCommand({ progress: opts.progress !== false })));
+  .option('--dry-run', 'Print branch report without prompting to delete')
+  .action((opts) =>
+    runCommand(() =>
+      sweepCommand({ progress: opts.progress !== false, dryRun: opts.dryRun === true })
+    )
+  );
 
 await program.parse(Deno.args);

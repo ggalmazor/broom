@@ -63,7 +63,7 @@ function cyan(s: string): string {
 function colorStatus(status: BranchStatus): string {
   switch (status) {
     case 'merged':
-      return dim(STATUS_LABEL[status]);
+      return green(STATUS_LABEL[status]);
     case 'unpushed':
       return yellow(STATUS_LABEL[status]);
     case 'needs-rebase':
@@ -193,7 +193,7 @@ export async function sweepBranchesNonInteractive(branches: string[]): Promise<v
  * 5. Asks for confirmation, then deletes.
  */
 export async function sweepCommand(
-  opts: { progress: boolean } = { progress: true },
+  opts: { progress: boolean; dryRun?: boolean } = { progress: true },
 ): Promise<void> {
   if (!(await isGitRepo())) {
     throw new NotInGitRepoError();
@@ -258,6 +258,16 @@ export async function sweepCommand(
     .filter(Boolean)
     .join(', ');
   console.log(`Done. ${summary}\n`);
+
+  for (const b of branches) {
+    const wt = worktrees.get(b.name);
+    const wtSuffix = wt ? `  ${dim('[worktree]')}` : '';
+    console.log(`  ${b.name.padEnd(40)} ${colorStatus(b.status)}${wtSuffix}`);
+  }
+
+  if (opts.dryRun) return;
+
+  console.log('');
 
   const checkboxOptions = branches.map((b) => {
     const wt = worktrees.get(b.name);
