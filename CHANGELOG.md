@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `install.sh` script for one-liner installation from GitHub releases
 - `--dry-run` flag for `broom sweep`: fetches, analyzes, and prints a full branch report without prompting to delete
 - Squash merge detection via blob comparison: compares file blob SHAs between the branch tip and `main` using `git ls-tree`, catching squash merges that `--cherry-mark` cannot detect (multi-commit branches). Immune to external diff drivers such as `difft`.
 - Fast-forward local branches that are strictly behind their remote without requiring a checkout
