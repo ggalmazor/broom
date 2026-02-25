@@ -63,10 +63,10 @@ fi
 chmod +x "$TEMP_FILE"
 
 # Determine install location
-if [ -w /usr/local/bin ]; then
-  INSTALL_DIR="/usr/local/bin"
-elif [ -d "$HOME/bin" ]; then
+if [ -d "$HOME/bin" ]; then
   INSTALL_DIR="$HOME/bin"
+elif [ -w /usr/local/bin ]; then
+  INSTALL_DIR="/usr/local/bin"
 else
   INSTALL_DIR="$HOME/.local/bin"
   mkdir -p "$INSTALL_DIR"
